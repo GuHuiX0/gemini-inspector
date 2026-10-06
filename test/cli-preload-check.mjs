@@ -37,7 +37,11 @@ const patchedAfter = globalThis.fetch?.name === 'patchedFetch';
 
 const res = await fetch(
   'https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse',
-  { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ya29.SECRETTOKEN' }, body: '{"model":"gemini-2.5-pro","project":"p"}' },
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ya29.SECRETTOKEN' },
+    body: '{"model":"gemini-2.5-pro","project":"p","request":{"session_id":"sess-abc-123","contents":[]}}',
+  },
 );
 let got = '';
 for await (const c of res.body) got += Buffer.from(c).toString('utf8');
@@ -62,6 +66,9 @@ const pass =
   row.stream === true &&
   row.inputTokens === 42 &&
   row.outputTokens === 1 &&
+  row.model === 'gemini-2.5-pro' &&
+  row.sessionId === 'sess-abc-123' &&
+  typeof row.pid === 'number' &&
   !JSON.stringify(row).includes('SECRETTOKEN');
 
 process.stdout.write(pass ? '[test] PASS\n' : '[test] FAIL\n');

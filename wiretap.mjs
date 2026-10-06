@@ -215,14 +215,41 @@ function safeJson(text) {
   }
 }
 
-/** Model name from a :generateContent / :streamGenerateContent URL. */
-function modelFromUrl(url) {
-  try {
-    const m = new URL(url).pathname.match(/\/models\/([^:/]+)/);
-    return m ? m[1] : null;
-  } catch {
-    return null;
+/**
+ * Model name. Plain Gemini/Vertex URLs carry it in the path; the Code Assist
+ * (OAuth login) endpoint does not — there the model is a field of the request
+ * body wrapper — so fall back to the body.
+ */
+function modelFrom(json, url) {
+  const fromUrl = (() => {
+    try {
+      const m = new URL(url).pathname.match(/\/models\/([^:/]+)/);
+      return m ? m[1] : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (fromUrl) return fromUrl;
+  for (const c of [json?.model, json?.request?.model]) {
+    if (typeof c === 'string' && c) return c;
   }
+  return null;
+}
+
+/**
+ * The CLI stamps its own session id into the request body. Shape differs by
+ * backend, so probe the known locations:
+ *   Code Assist / Vertex : { request: { session_id } } or { session_id }
+ *   plain Gemini API     : { sessionId } (when present at all)
+ * This is what makes multiple concurrent sessions distinguishable, since they
+ * may share one capture directory.
+ */
+function sessionFromBody(json) {
+  if (!json || typeof json !== 'object') return null;
+  for (const candidate of [json?.request?.session_id, json?.session_id, json?.sessionId, json?.request?.sessionId]) {
+    if (typeof candidate === 'string' && candidate) return candidate;
+  }
+  return null;
 }
 
 /** Token counts: last usageMetadata in an SSE stream, or the JSON body. */
@@ -349,6 +376,7 @@ async function dumpCycle(url, init, method) {
     log(`body read failed for ${redacted}: ${err}`);
   }
   const reqSize = redactBytes(bytes, `${base}.request.bin`);
+  const reqJson = safeJson(bytes ? Buffer.from(bytes).toString('utf8') : '');
 
   const record = {
     id,
@@ -357,6 +385,7 @@ async function dumpCycle(url, init, method) {
     method,
     url: redacted,
     scope: kind,
+    sessionId: sessionFromBody(reqJson),
     startedAt: new Date(startedAt).toISOString(),
     request: {
       headers: reqHeaders,
@@ -371,7 +400,7 @@ async function dumpCycle(url, init, method) {
     },
   };
   writeArtifact(`${base}.json`, JSON.stringify(record, null, 2));
-  return { base, record, replacer };
+  return { base, record, replacer, reqJson };
 }
 
 /** Patch global fetch so model request/response payloads can be inspected. */
@@ -487,7 +516,7 @@ function finalizeCycle(cycle, meta, bytes) {
       usage,
       durationMs: Date.now() - new Date(record.startedAt).getTime(),
     };
-    record.model = modelFromUrl(record.url);
+    record.model = modelFrom(cycle.reqJson, record.url);
     record.durationMs = record.response.durationMs;
     writeArtifact(`${base}.json`, JSON.stringify(record, null, 2));
     appendIndex({
@@ -497,6 +526,8 @@ function finalizeCycle(cycle, meta, bytes) {
       scope: record.scope,
       status: meta.status,
       model: record.model,
+      sessionId: record.sessionId,
+      pid: record.pid,
       stream: meta.isStream,
       reqBytes: record.request.bodyBytes,
       respBytes: all.byteLength,

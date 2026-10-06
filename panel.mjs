@@ -111,6 +111,7 @@ function stats() {
   let respBytes = 0;
   const lat = [];
   const models = new Map();
+  const sessions = new Map();
   const heaviest = [];
 
   for (const e of entries) {
@@ -150,6 +151,19 @@ function stats() {
     m.cost += c || 0;
     if (e.status >= 400 || e.status == null) m.errors += 1;
     models.set(mk, m);
+
+    // Group by the CLI's own session id when present; fall back to process id so
+    // concurrent sessions sharing one capture dir stay distinguishable.
+    const sk = e.sessionId ? `session ${e.sessionId}` : e.pid ? `pid ${e.pid}` : '(unlabelled)';
+    const s = sessions.get(sk) ?? { key: sk, sessionId: e.sessionId ?? null, pid: e.pid ?? null, n: 0, inTok: 0, outTok: 0, cost: 0, errors: 0, first: t, last: t };
+    s.n += 1;
+    s.inTok += e.inputTokens || 0;
+    s.outTok += e.outputTokens || 0;
+    s.cost += c || 0;
+    if (e.status >= 400 || e.status == null) s.errors += 1;
+    s.first = Math.min(s.first, t);
+    s.last = Math.max(s.last, t);
+    sessions.set(sk, s);
   }
 
   lat.sort((a, b) => a - b);
@@ -186,6 +200,7 @@ function stats() {
         outTok: b.outTok,
       })),
     models: [...models.values()].sort((a, b) => b.n - a.n),
+    sessions: [...sessions.values()].sort((a, b) => b.last - a.last),
     heaviest: heaviest.sort((a, b) => b.reqBytes - a.reqBytes).slice(0, 10),
   };
 }
@@ -328,6 +343,7 @@ const DASHBOARD = String.raw`<!doctype html>
   <span class="muted" id="dir"></span>
   <span class="spacer"></span>
   <input id="q" placeholder="filter url / model…" size="26">
+  <select id="fs"><option value="">all sessions</option></select>
   <select id="fm"><option value="">all models</option></select>
   <span class="muted" id="stamp"></span>
 </header>
@@ -341,6 +357,7 @@ const DASHBOARD = String.raw`<!doctype html>
     <div class="box"><h2>Models</h2><div class="body" style="padding:0"><table id="models"></table></div></div>
     <div class="box"><h2>Heaviest request bodies (context growth)</h2><div class="body" style="padding:0"><table id="heavy"></table></div></div>
   </div>
+  <div class="box"><h2>Sessions</h2><div class="body" style="padding:0"><table id="sessions"></table></div></div>
   <div class="box"><h2>Exchanges</h2><div class="body" style="padding:0"><table id="list"></table></div></div>
 </main>
 <div class="drawer" id="drawer">
@@ -407,9 +424,33 @@ function renderHeavy(s){
   [...$('heavy').querySelectorAll('tbody tr[data-d]')].forEach(tr=>tr.onclick=()=>openRecord(tr.dataset.d));
 }
 
+function renderSessions(s){
+  const rows=s.sessions.map(x=>{
+    const span=x.last-x.first;
+    return '<tr data-s="'+esc(x.key)+'"><td>'+esc(x.key)+'</td><td class="num">'+x.n+'</td>'+
+      '<td class="num">'+fmt(x.inTok)+'</td><td class="num">'+fmt(x.outTok)+'</td><td class="num">$'+x.cost.toFixed(4)+'</td>'+
+      '<td class="num" style="color:'+(x.errors?'var(--err)':'var(--dim)')+'">'+x.errors+'</td>'+
+      '<td class="muted">'+new Date(x.first).toLocaleTimeString()+'</td>'+
+      '<td class="muted">'+ms(span)+'</td></tr>';
+  }).join('');
+  $('sessions').innerHTML='<thead><tr><th>session</th><th class="num">reqs</th><th class="num">in</th><th class="num">out</th><th class="num">cost</th><th class="num">err</th><th>first</th><th>span</th></tr></thead><tbody>'+
+    (rows||'<tr><td colspan="8" class="empty">no data</td></tr>')+'</tbody>';
+  [...$('sessions').querySelectorAll('tbody tr[data-s]')].forEach(tr=>tr.onclick=()=>{
+    const sel=$('fs'); sel.value = (sel.value===tr.dataset.s)?'':tr.dataset.s; renderList();
+  });
+  const sel=$('fs'), keep=sel.value;
+  sel.innerHTML='<option value="">all sessions</option>'+s.sessions.map(x=>'<option>'+esc(x.key)+'</option>').join('');
+  sel.value=keep;
+}
+
 function filtered(){
-  const q=$('q').value.toLowerCase(), m=$('fm').value;
-  const list=ENTRIES.filter(e=>(!m||e.model===m)&&(!q||((e.url||'')+(e.model||'')).toLowerCase().includes(q)));
+  const q=$('q').value.toLowerCase(), m=$('fm').value, ss=$('fs').value;
+  const list=ENTRIES.filter(e=>{
+    if (m && e.model!==m) return false;
+    if (ss && sessKey(e)!==ss) return false;
+    if (q && !((e.url||'')+(e.model||'')+(e.sessionId||'')).toLowerCase().includes(q)) return false;
+    return true;
+  });
   list.sort((a,b)=>{
     const av=a[sortKey], bv=b[sortKey];
     if(av==null&&bv==null) return 0; if(av==null) return 1; if(bv==null) return -1;
@@ -418,9 +459,12 @@ function filtered(){
   return list;
 }
 
+function sessKey(e){ return e.sessionId ? 'session '+e.sessionId : e.pid ? 'pid '+e.pid : '(unlabelled)' }
+function shortSess(e){ const k=sessKey(e); return k.length>18 ? k.slice(0,17)+'…' : k }
+
 function renderList(){
   const list=filtered();
-  const head=[['t','time'],['method','method'],['model','model'],['status','status'],['durationMs','latency'],['reqBytes','req B'],['inputTokens','in tok'],['outputTokens','out tok'],['url','url']];
+  const head=[['t','time'],['method','method'],['model','model'],['status','status'],['durationMs','latency'],['reqBytes','req B'],['inputTokens','in tok'],['outputTokens','out tok'],['sessionId','session'],['url','url']];
   $('list').innerHTML='<thead><tr>'+head.map(([k,l])=>'<th data-k="'+k+'">'+l+(sortKey===k?(sortDir>0?' ▲':' ▼'):'')+'</th>').join('')+'</tr></thead><tbody>'+
     (list.map(e=>{
       const t=e.t?new Date(e.t).toLocaleTimeString():'-';
@@ -430,8 +474,9 @@ function renderList(){
         '<td><span class="pill '+cls+'">'+(e.status==null?'-':e.status)+'</span>'+(e.stream?' <span class="pill">SSE</span>':'')+'</td>'+
         '<td class="num">'+ms(e.durationMs)+'</td><td class="num">'+fmt(e.reqBytes)+'</td>'+
         '<td class="num">'+fmt(e.inputTokens)+'</td><td class="num">'+fmt(e.outputTokens)+'</td>'+
+        '<td class="muted" title="'+esc(sessKey(e))+'">'+esc(shortSess(e))+'</td>'+
         '<td><span class="u">'+esc((e.url||'').replace(/^https?:\/\//,''))+'</span></td></tr>';
-    }).join('')||'<tr><td colspan="9" class="empty">no exchanges yet — run gemini with the hook enabled</td></tr>')+'</tbody>';
+    }).join('')||'<tr><td colspan="10" class="empty">no exchanges yet — run gemini with the hook enabled</td></tr>')+'</tbody>';
   [...$('list').querySelectorAll('thead th[data-k]')].forEach(th=>th.onclick=()=>{const k=th.dataset.k; if(sortKey===k) sortDir*=-1; else {sortKey=k;sortDir=-1} renderList()});
   [...$('list').querySelectorAll('tbody tr[data-d]')].forEach(tr=>tr.onclick=()=>openRecord(tr.dataset.d));
 }
@@ -513,13 +558,13 @@ async function tick(){
     $('dir').textContent=s.dir;
     $('stamp').textContent=new Date().toLocaleTimeString();
     $('dot').style.background='var(--ok)';
-    renderCards(s); renderModels(s); renderHeavy(s); renderList();
+    renderCards(s); renderModels(s); renderSessions(s); renderHeavy(s); renderList();
     chart($('chartReq'),s.series,['n','err'],['#7aa2f7','#f7768e']);
     chart($('chartTok'),s.series,['inTok','outTok'],['#9ece6a','#bb9af7']);
   }catch(e){ $('dot').style.background='var(--err)' }
 }
 $('dClose').onclick=()=>{$('drawer').classList.remove('on');curDir=null;renderList()};
-$('q').oninput=renderList; $('fm').onchange=renderList;
+$('q').oninput=renderList; $('fm').onchange=renderList; $('fs').onchange=renderList;
 window.addEventListener('resize',()=>{ if(STATS){chart($('chartReq'),STATS.series,['n','err'],['#7aa2f7','#f7768e']);chart($('chartTok'),STATS.series,['inTok','outTok'],['#9ece6a','#bb9af7'])} });
 tick(); setInterval(tick,1000);
 </script></body></html>`;

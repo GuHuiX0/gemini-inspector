@@ -11,10 +11,13 @@ fs.rmSync(dir, { recursive: true, force: true });
 fs.mkdirSync(path.join(dir, 'archive'), { recursive: true });
 
 const models = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash'];
+// Rotate through a few session ids so the panel's session grouping is exercised.
+const sessionIds = ['a1b2c3d4-1111-4000-8000-aaaaaaaaaaaa', 'e5f6a7b8-2222-4000-8000-bbbbbbbbbbbb'];
 const enc = new TextEncoder();
 const indexLines = [];
 
 for (let i = 0; i < count; i++) {
+  const sessionId = sessionIds[Math.floor(i / 5) % sessionIds.length];
   const model = models[i % models.length];
   const stream = i % 3 !== 2;
   const id = `${Date.now().toString(36)}-${1000 + i}-${i + 1}`;
@@ -26,12 +29,18 @@ for (let i = 0; i < count; i++) {
   const isError = i === count - 2;
 
   const request = JSON.stringify({
-    contents: [
-      { role: 'user', parts: [{ text: `turn ${i}: please refactor module ${i % 5}` }] },
-      { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: `src/m${i % 5}.ts` } } }] },
-      { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'x'.repeat(400 + i * 40) } } }] },
-    ],
-    tools: [{ functionDeclarations: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object' } }] }],
+    model,
+    project: 'fake-project',
+    user_prompt_id: `prompt-${i}`,
+    request: {
+      contents: [
+        { role: 'user', parts: [{ text: `turn ${i}: please refactor module ${i % 5}` }] },
+        { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: `src/m${i % 5}.ts` } } }] },
+        { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'x'.repeat(400 + i * 40) } } }] },
+      ],
+      tools: [{ functionDeclarations: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object' } }] }],
+      session_id: sessionId,
+    },
   });
 
   const words = ['Analysing', 'the', 'module', 'and', 'proposing', 'a', 'refactor'];
@@ -72,6 +81,7 @@ for (let i = 0; i < count; i++) {
     scope: 'google',
     startedAt: startedAt.toISOString(),
     model,
+    sessionId,
     durationMs,
     request: {
       headers: { 'content-type': 'application/json', authorization: '<redacted:Bear..9f2c len=39>' },
@@ -112,6 +122,8 @@ for (let i = 0; i < count; i++) {
       scope: 'google',
       status,
       model,
+      sessionId,
+      pid: 4242,
       stream,
       reqBytes: record.request.bodyBytes,
       respBytes: record.response.bodyBytes,

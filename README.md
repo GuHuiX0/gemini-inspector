@@ -29,11 +29,40 @@ reinstalls.
 | `test/cli-preload-check.mjs` | Self-test against the real bundle layout: proves the hook is installed and captures a Code Assist (`cloudcode-pa`) shaped SSE call. No network. |
 | `test/entry-probe.mjs` | Diagnostic: prints whether the preload reached this process and whether `fetch` is patched. |
 | `test/make-fake-captures.mjs` | Generates synthetic captures so you can try the panel/viewer with zero API traffic. |
+| `test/show-capture.mjs` | Prints exactly what one capture directory contains (structure, index row, record metadata, archived request body, credential handling). Run it to see what gets recorded before capturing anything real. |
 
 Captures are written to `<dir>/` (`index.jsonl` + `<id>.json` + `archive/*.bin`).
 Default dir is `./.gemini-wiretap` in the current working directory. **Secrets in
 headers and query strings are redacted by default** — but treat capture
 directories as sensitive anyway, since they contain your full prompts and code.
+
+### What gets recorded
+
+Per model call, three things:
+
+| File | Contents |
+|---|---|
+| `archive/<id>.request.bin` | The **complete request body**, byte-for-byte and untruncated: your prompt, the whole conversation history, the system instruction, every tool/function declaration and its JSON schema, generation config, and the session id. This is the file that answers "what did the model actually receive?". |
+| `archive/<id>.response.bin` | The **raw response bytes**. For streaming calls this is the SSE stream exactly as it arrived, chunk boundaries included — not a re-serialized version. |
+| `<id>.json` | Metadata: url, method, status, timing, token usage, request/response headers (**credentials redacted**), byte counts, and for streams an `sseSummary` (frame count, finish reason, accumulated text, usage). |
+| `index.jsonl` | One line per exchange with the fields the panel needs (time, model, status, latency, bytes, tokens, sessionId, pid), so listing does not require reading the big files. |
+
+Run `node test/show-capture.mjs` to print a real example of all of the above.
+
+**Redacted:** `authorization`, `x-goog-api-key`, `x-api-key`, `cookie`/`set-cookie`,
+`proxy-authorization`, plus `key`/`access_token`/`id_token` in query strings.
+Redaction shows a shape hint only, e.g. `<redacted:Bear..7890 len=59>` — I
+verified the raw token does not appear anywhere in the directory.
+
+**Not redacted (by design, since it is the point of the tool):** prompts, file
+contents the agent read, tool outputs, system instructions, tool schemas. A
+capture directory is therefore as sensitive as your source tree — the bundled
+`.gitignore` excludes `archive/`, `*.jsonl` and `viewer.html` so it is not
+committed by accident.
+
+**Not recorded:** clipboard, environment variables, files the agent never sent to
+the model, or anything from other processes. Only HTTP(S) model traffic (plus
+WebSocket frames if `GEMINI_WIRETAP_WS=1`) that matches the active scope.
 
 ---
 
@@ -84,6 +113,62 @@ It is **session-volatile**. It only sets process-level environment variables:
   `-Unset` without having armed changes nothing.
 
 So: closing the terminal is always a safe, complete undo.
+
+### Multiple sessions sharing one capture directory
+
+`-Dir` is **optional and free-form**. It is simply the output folder:
+
+```
+<dir>/index.jsonl          one JSON line per exchange (the panel tails this)
+<dir>/<id>.json            one full record per exchange
+<dir>/archive/<id>.*.bin   raw request/response bodies
+```
+
+The hook creates it on first use (`mkdir -p`) and appends. Pointing several
+gemini sessions at the **same** folder is safe and is in fact the default
+behaviour when you do not pass `-Dir` and run them from the same project:
+
+- **No filename collisions.** Each capture id is `<time36>-<pid>-<counter>`, and
+  concurrent sessions are different processes, so their pid component differs.
+- **No lost or interleaved index rows.** The index is appended with a single
+  `O_APPEND` write per exchange (atomic well under the ~4 KB Windows threshold
+  for append atomicity), and each row is newline-terminated.
+- **No overwrites.** Bodies are archived with `fs.writeFileSync`, never appended,
+  so they cannot interleave.
+
+Verified with 4 concurrent writer processes × 30 captures into one directory:
+120/120 index rows, 0 parse failures, 120 unique ids, 240 archive files, none
+empty.
+
+**Sessions are labelled, not separated.** `wiretap.mjs` extracts the CLI's own
+session id from the request body (`request.session_id` for Code Assist/Vertex
+login, `sessionId` where present for plain API-key mode) and records the process
+id. The panel therefore shows:
+
+- a **Sessions** table (requests, tokens, cost, errors, first-seen, span), which
+  is the "what did this session cost me" view;
+- a **session filter** in the header;
+- a **session column** on every exchange row.
+
+Clicking a row in the Sessions table filters the exchange list to it. Rows
+without a session id fall back to `pid <n>`, so they still group sensibly.
+
+If you would rather keep sessions physically separate, just give each terminal a
+different `-Dir` — but then each gets its own panel, and you lose the merged
+timeline and the cross-session totals.
+
+### Alternative: preload without the shim
+
+`register.cjs` exists because `NODE_OPTIONS=--require` only loads CommonJS and
+gemini-cli's entry is ESM. `--import` can load ESM directly:
+
+```powershell
+$env:NODE_OPTIONS = "--import file:///D:/codes/gemini-inspector/wiretap.mjs"
+```
+
+Use a `file:///` URL with forward slashes, and keep the same no-quotes /
+ASCII-only rules. Verified working. The shim remains the default because it is
+the only form that also works when the CLI entry happens to be required as CJS.
 
 Or set them by hand:
 
@@ -200,6 +285,8 @@ panel's cost and trend charts). Secrets should appear as `<redacted:AIza..9f2c l
   tokens, estimated cost, bytes in/out.
 - **Requests / 10s** and **Tokens / 10s** stacked bar charts (errors in red).
 - **Models** table — requests, tokens, cost, errors per model.
+- **Sessions** table — same rollup per gemini session (or `pid` when the session
+  id is absent), with first-seen and span. Click a row to filter the list.
 - **Heaviest request bodies** — the most direct view of **context growth**; if a
   session gets expensive, look here first.
 - **Exchanges** table — sortable/filterable; click any row for a drawer with
