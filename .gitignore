@@ -1,0 +1,13 @@
+# Captured requests and responses may contain prompts, code, or credentials.
+.gemini-wiretap/
+archive/
+*.jsonl
+viewer.html
+summary.txt
+
+# Local test output and environment files.
+out-*/
+node_modules/
+.env
+.env.*
+*.log

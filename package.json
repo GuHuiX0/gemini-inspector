@@ -1,0 +1,16 @@
+{
+  "name": "gemini-inspector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "See exactly what gemini-cli sends to and receives from the model: fetch-level capture hook, live panel, and offline viewer.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "panel": "node panel.mjs",
+    "view": "node genview.mjs",
+    "test": "node test/stream-check.mjs && node test/unary-check.mjs && node test/scope-check.mjs",
+    "fake": "node test/make-fake-captures.mjs ./out-demo 14"
+  }
+}
